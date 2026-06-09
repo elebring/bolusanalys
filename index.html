@@ -5,19 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bolusanalys</title>
 <style>
-body { font-family: system-ui; padding: 16px; max-width: 900px; margin: auto; }
-input, button { font-size: 16px; padding: 10px; width: 100%; margin: 8px 0; }
-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+body { font-family: system-ui; padding: 16px; max-width: 1000px; margin: auto; }
+input { font-size: 16px; padding: 10px; width: 100%; margin: 8px 0; }
+table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
 th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
-.good { color: green; }
-.bad { color: red; }
+.day-row td {
+  background: #f1f1f1;
+  font-weight: bold;
+  font-size: 16px;
+  padding-top: 14px;
+}
+.ok { color: green; font-weight: bold; }
+.warn { color: red; font-weight: bold; }
 </style>
 </head>
 <body>
 
 <h1>Bolusanalys</h1>
 
-<p>Ladda upp Tandem CSV-export. Appen hittar måltidsbolus och jämför CGM vid bolus med CGM cirka 2 timmar senare.</p>
+<p>Ladda upp Tandem CSV-export. Appen grupperar måltidsbolus per dag och jämför CGM cirka 2 timmar efter bolus mot målvärdet 6,1 mmol/l.</p>
 
 <input type="file" id="csvFile" accept=".csv">
 
@@ -29,13 +35,16 @@ th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
 <th>Bolus</th>
 <th>BG vid bolus</th>
 <th>CGM +2h</th>
-<th>Förändring</th>
+<th>BG-förändring</th>
+<th>CGM +2h mot mål 6,1</th>
 </tr>
 </thead>
 <tbody id="rows"></tbody>
 </table>
 
 <script>
+const TARGET = 6.1;
+
 document.getElementById("csvFile").addEventListener("change", async e => {
   const file = e.target.files[0];
   if (!file) return;
@@ -116,11 +125,13 @@ function analyzeCsv(text) {
   const results = boluses.map(b => {
     const afterTime = new Date(b.time.getTime() + 2 * 60 * 60 * 1000);
     const cgmAfter = findClosestCgm(cgm, afterTime);
-    const change = cgmAfter ? cgmAfter.value - b.bg : null;
+    const bgChange = cgmAfter ? cgmAfter.value - b.bg : null;
+    const targetDiff = cgmAfter ? cgmAfter.value - TARGET : null;
 
-    return { ...b, cgmAfter, change };
+    return { ...b, cgmAfter, bgChange, targetDiff };
   });
 
+  results.sort((a, b) => a.time - b.time);
   render(results);
 }
 
@@ -137,40 +148,63 @@ function findClosestCgm(cgm, targetTime) {
     }
   }
 
-  // Acceptera bara CGM inom 20 minuter från 2-timmarspunkten
   if (bestDiff > 20 * 60 * 1000) return null;
 
   return best;
 }
 
+function formatDate(date) {
+  return date.toLocaleDateString("sv-SE", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  });
+}
+
 function formatTime(date) {
-  return date.toLocaleString("sv-SE", {
-    month: "2-digit",
-    day: "2-digit",
+  return date.toLocaleTimeString("sv-SE", {
     hour: "2-digit",
     minute: "2-digit"
   });
 }
 
-function render(results) {
-  rows.innerHTML = results.map(r => {
-    const after = r.cgmAfter ? r.cgmAfter.value.toFixed(1) : "saknas";
-    const change = r.change === null
-      ? "saknas"
-      : `${r.change > 0 ? "+" : ""}${r.change.toFixed(1)}`;
+function formatDiff(value) {
+  if (value === null) return "saknas";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
 
-    const cls = r.change === null
-      ? ""
-      : Math.abs(r.change) <= 2 ? "good" : "bad";
+function render(results) {
+  let currentDay = "";
+
+  rows.innerHTML = results.map(r => {
+    const day = r.time.toDateString();
+    let dayHeader = "";
+
+    if (day !== currentDay) {
+      currentDay = day;
+      dayHeader = `
+        <tr class="day-row">
+          <td colspan="7">${formatDate(r.time)}</td>
+        </tr>
+      `;
+    }
+
+    const after = r.cgmAfter ? r.cgmAfter.value.toFixed(1) : "saknas";
+    const targetClass =
+      r.targetDiff === null ? "" :
+      Math.abs(r.targetDiff) > 1.5 ? "warn" : "ok";
 
     return `
+      ${dayHeader}
       <tr>
         <td>${formatTime(r.time)}</td>
         <td>${r.carbs} g</td>
         <td>${r.insulin.toFixed(2)} E</td>
         <td>${r.bg.toFixed(1)}</td>
         <td>${after}</td>
-        <td class="${cls}">${change}</td>
+        <td>${formatDiff(r.bgChange)}</td>
+        <td class="${targetClass}">${formatDiff(r.targetDiff)}</td>
       </tr>
     `;
   }).join("");

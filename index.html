@@ -44,6 +44,7 @@ th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
 
 <script>
 const TARGET = 6.1;
+const MERGE_WINDOW_MINUTES = 40;
 
 document.getElementById("csvFile").addEventListener("change", async e => {
   const file = e.target.files[0];
@@ -59,14 +60,11 @@ function parseCsvLine(line) {
   let inQuotes = false;
 
   for (let char of line) {
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === "," && !inQuotes) {
+    if (char === '"') inQuotes = !inQuotes;
+    else if (char === "," && !inQuotes) {
       result.push(current);
       current = "";
-    } else {
-      current += char;
-    }
+    } else current += char;
   }
 
   result.push(current);
@@ -75,10 +73,8 @@ function parseCsvLine(line) {
 
 function analyzeCsv(text) {
   const lines = text.split(/\r?\n/).filter(Boolean);
-
   const cgm = [];
   const boluses = [];
-
   let mode = "";
 
   for (const line of lines) {
@@ -102,37 +98,122 @@ function analyzeCsv(text) {
     }
 
     if (mode === "bolus" && cols[0] === "Bolus") {
-      const bolusType = cols[1];
+      const bolusType = cols[1] || "";
       const carbs = Number(cols[16] || 0);
       const mealBolus = Number(cols[7] || 0);
+      const insulin = Number(cols[6] || 0);
+      const startTime = new Date(cols[5]);
 
-      if (
-        carbs > 0 &&
-        mealBolus > 0 &&
-        (bolusType.includes("Måltid") || bolusType.includes("Mat"))
-      ) {
+      if (carbs > 0 && mealBolus > 0) {
         boluses.push({
-          time: new Date(cols[5]),
+          time: startTime,
+          endTime: getBolusEndTime(cols, startTime),
           bg: Number(cols[3]),
-          insulin: Number(cols[6]),
+          insulin,
           mealBolus,
-          carbs
+          carbs,
+          bolusType,
+          isExtended: bolusType.toLowerCase().includes("förläng")
         });
       }
     }
   }
 
-  const results = boluses.map(b => {
-    const afterTime = new Date(b.time.getTime() + 2 * 60 * 60 * 1000);
+  boluses.sort((a, b) => a.time - b.time);
+
+  const groupedBoluses = mergeBoluses(boluses);
+
+  const results = groupedBoluses.map(g => {
+    const afterBaseTime = g.hasExtended ? g.latestEndTime : g.lastBolusTime;
+    const afterTime = new Date(afterBaseTime.getTime() + 2 * 60 * 60 * 1000);
+
+    const cgmAtStart = findClosestCgm(cgm, g.firstBolusTime);
     const cgmAfter = findClosestCgm(cgm, afterTime);
-    const bgChange = cgmAfter ? cgmAfter.value - b.bg : null;
+
+    const bgStart = cgmAtStart ? cgmAtStart.value : g.bg;
+    const bgChange = cgmAfter ? cgmAfter.value - bgStart : null;
     const targetDiff = cgmAfter ? cgmAfter.value - TARGET : null;
 
-    return { ...b, cgmAfter, bgChange, targetDiff };
+    return { ...g, bgStart, cgmAfter, bgChange, targetDiff };
   });
 
-  results.sort((a, b) => a.time - b.time);
   render(results);
+}
+
+function mergeBoluses(boluses) {
+  const groups = [];
+
+  for (const b of boluses) {
+    const lastGroup = groups[groups.length - 1];
+
+    if (
+      lastGroup &&
+      (b.time - lastGroup.lastBolusTime) <= MERGE_WINDOW_MINUTES * 60 * 1000
+    ) {
+      lastGroup.items.push(b);
+      lastGroup.carbs += b.carbs;
+      lastGroup.insulin += b.insulin;
+      lastGroup.mealBolus += b.mealBolus;
+      lastGroup.lastBolusTime = b.time;
+      lastGroup.latestEndTime =
+        b.endTime > lastGroup.latestEndTime ? b.endTime : lastGroup.latestEndTime;
+      lastGroup.hasMultiple = true;
+      lastGroup.hasExtended = lastGroup.hasExtended || b.isExtended;
+    } else {
+      groups.push({
+        items: [b],
+        firstBolusTime: b.time,
+        lastBolusTime: b.time,
+        latestEndTime: b.endTime,
+        bg: b.bg,
+        carbs: b.carbs,
+        insulin: b.insulin,
+        mealBolus: b.mealBolus,
+        hasMultiple: false,
+        hasExtended: b.isExtended
+      });
+    }
+  }
+
+  return groups;
+}
+
+function getBolusEndTime(cols, startTime) {
+  const possibleDurationColumns = [9, 10, 11, 12, 13, 14, 15];
+
+  for (const index of possibleDurationColumns) {
+    const value = cols[index];
+    const minutes = parseDurationToMinutes(value);
+
+    if (minutes && minutes > 0) {
+      return new Date(startTime.getTime() + minutes * 60 * 1000);
+    }
+  }
+
+  return startTime;
+}
+
+function parseDurationToMinutes(value) {
+  if (!value) return 0;
+
+  const text = String(value).toLowerCase();
+
+  const hourMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(h|tim|hour)/);
+  const minMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(m|min)/);
+
+  let minutes = 0;
+
+  if (hourMatch) minutes += Number(hourMatch[1].replace(",", ".")) * 60;
+  if (minMatch) minutes += Number(minMatch[1].replace(",", "."));
+
+  if (!hourMatch && !minMatch) {
+    const numeric = Number(text.replace(",", "."));
+    if (!isNaN(numeric) && numeric > 0 && numeric <= 24) {
+      minutes = numeric * 60;
+    }
+  }
+
+  return minutes;
 }
 
 function findClosestCgm(cgm, targetTime) {
@@ -141,7 +222,6 @@ function findClosestCgm(cgm, targetTime) {
 
   for (const point of cgm) {
     const diff = Math.abs(point.time - targetTime);
-
     if (diff < bestDiff) {
       best = point;
       bestDiff = diff;
@@ -149,7 +229,6 @@ function findClosestCgm(cgm, targetTime) {
   }
 
   if (bestDiff > 20 * 60 * 1000) return null;
-
   return best;
 }
 
@@ -174,18 +253,25 @@ function formatDiff(value) {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
 }
 
+function getNote(r) {
+  const notes = [];
+  if (r.hasMultiple) notes.push("Multipla bolus");
+  if (r.hasExtended) notes.push("Förlängd bolus");
+  return notes.length ? notes.join(" + ") : "";
+}
+
 function render(results) {
   let currentDay = "";
 
   rows.innerHTML = results.map(r => {
-    const day = r.time.toDateString();
+    const day = r.firstBolusTime.toDateString();
     let dayHeader = "";
 
     if (day !== currentDay) {
       currentDay = day;
       dayHeader = `
         <tr class="day-row">
-          <td colspan="7">${formatDate(r.time)}</td>
+          <td colspan="8">${formatDate(r.firstBolusTime)}</td>
         </tr>
       `;
     }
@@ -198,13 +284,14 @@ function render(results) {
     return `
       ${dayHeader}
       <tr>
-        <td>${formatTime(r.time)}</td>
-        <td>${r.carbs} g</td>
+        <td>${formatTime(r.firstBolusTime)}</td>
+        <td>${r.carbs.toFixed(0)} g</td>
         <td>${r.insulin.toFixed(2)} E</td>
-        <td>${r.bg.toFixed(1)}</td>
+        <td>${r.bgStart.toFixed(1)}</td>
         <td>${after}</td>
         <td>${formatDiff(r.bgChange)}</td>
         <td class="${targetClass}">${formatDiff(r.targetDiff)}</td>
+        <td>${getNote(r)}</td>
       </tr>
     `;
   }).join("");

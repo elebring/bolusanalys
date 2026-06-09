@@ -5,25 +5,60 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bolusanalys</title>
 <style>
-body { font-family: system-ui; padding: 16px; max-width: 1000px; margin: auto; }
-input { font-size: 16px; padding: 10px; width: 100%; margin: 8px 0; }
-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
-th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+body {
+  font-family: system-ui;
+  padding: 16px;
+  max-width: 1100px;
+  margin: auto;
+}
+
+input {
+  font-size: 16px;
+  padding: 10px;
+  width: 100%;
+  margin: 8px 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+th, td {
+  border-bottom: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+
 .day-row td {
   background: #f1f1f1;
   font-weight: bold;
   font-size: 16px;
   padding-top: 14px;
 }
-.ok { color: green; font-weight: bold; }
-.warn { color: red; font-weight: bold; }
+
+.ok {
+  color: green;
+  font-weight: bold;
+}
+
+.warn {
+  color: red;
+  font-weight: bold;
+}
 </style>
 </head>
 <body>
 
 <h1>Bolusanalys</h1>
 
-<p>Ladda upp Tandem CSV-export. Appen grupperar måltidsbolus per dag och jämför CGM cirka 2 timmar efter bolus mot målvärdet 6,1 mmol/l.</p>
+<p>
+Ladda upp Tandem CSV-export. Appen grupperar måltidsbolus per dag,
+slår ihop bolus inom 40 minuter och jämför CGM cirka 2 timmar efter bolus
+mot målvärdet 6,1 mmol/l.
+</p>
 
 <input type="file" id="csvFile" accept=".csv">
 
@@ -33,10 +68,11 @@ th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
 <th>Tid</th>
 <th>Kolh.</th>
 <th>Bolus</th>
-<th>BG vid bolus</th>
+<th>CGM vid bolus</th>
 <th>CGM +2h</th>
 <th>BG-förändring</th>
 <th>CGM +2h mot mål 6,1</th>
+<th>Notering</th>
 </tr>
 </thead>
 <tbody id="rows"></tbody>
@@ -60,11 +96,14 @@ function parseCsvLine(line) {
   let inQuotes = false;
 
   for (let char of line) {
-    if (char === '"') inQuotes = !inQuotes;
-    else if (char === "," && !inQuotes) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
       result.push(current);
       current = "";
-    } else current += char;
+    } else {
+      current += char;
+    }
   }
 
   result.push(current);
@@ -73,8 +112,10 @@ function parseCsvLine(line) {
 
 function analyzeCsv(text) {
   const lines = text.split(/\r?\n/).filter(Boolean);
+
   const cgm = [];
   const boluses = [];
+
   let mode = "";
 
   for (const line of lines) {
@@ -203,11 +244,17 @@ function parseDurationToMinutes(value) {
 
   let minutes = 0;
 
-  if (hourMatch) minutes += Number(hourMatch[1].replace(",", ".")) * 60;
-  if (minMatch) minutes += Number(minMatch[1].replace(",", "."));
+  if (hourMatch) {
+    minutes += Number(hourMatch[1].replace(",", ".")) * 60;
+  }
+
+  if (minMatch) {
+    minutes += Number(minMatch[1].replace(",", "."));
+  }
 
   if (!hourMatch && !minMatch) {
     const numeric = Number(text.replace(",", "."));
+
     if (!isNaN(numeric) && numeric > 0 && numeric <= 24) {
       minutes = numeric * 60;
     }
@@ -222,13 +269,17 @@ function findClosestCgm(cgm, targetTime) {
 
   for (const point of cgm) {
     const diff = Math.abs(point.time - targetTime);
+
     if (diff < bestDiff) {
       best = point;
       bestDiff = diff;
     }
   }
 
-  if (bestDiff > 20 * 60 * 1000) return null;
+  if (bestDiff > 20 * 60 * 1000) {
+    return null;
+  }
+
   return best;
 }
 
@@ -255,13 +306,29 @@ function formatDiff(value) {
 
 function getNote(r) {
   const notes = [];
-  if (r.hasMultiple) notes.push("Multipla bolus");
-  if (r.hasExtended) notes.push("Förlängd bolus");
+
+  if (r.hasMultiple) {
+    notes.push("Multipla bolus");
+  }
+
+  if (r.hasExtended) {
+    notes.push("Förlängd bolus");
+  }
+
   return notes.length ? notes.join(" + ") : "";
 }
 
 function render(results) {
   let currentDay = "";
+
+  if (!results.length) {
+    rows.innerHTML = `
+      <tr>
+        <td colspan="8">Inga måltidsbolus hittades i filen.</td>
+      </tr>
+    `;
+    return;
+  }
 
   rows.innerHTML = results.map(r => {
     const day = r.firstBolusTime.toDateString();
@@ -277,6 +344,7 @@ function render(results) {
     }
 
     const after = r.cgmAfter ? r.cgmAfter.value.toFixed(1) : "saknas";
+
     const targetClass =
       r.targetDiff === null ? "" :
       Math.abs(r.targetDiff) > 1.5 ? "warn" : "ok";

@@ -5,49 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bolusanalys</title>
 <style>
-body {
-  font-family: system-ui;
-  padding: 16px;
-  max-width: 1100px;
-  margin: auto;
-}
-
-input {
-  font-size: 16px;
-  padding: 10px;
-  width: 100%;
-  margin: 8px 0;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 12px;
-  font-size: 14px;
-}
-
-th, td {
-  border-bottom: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-}
-
-.day-row td {
-  background: #f1f1f1;
-  font-weight: bold;
-  font-size: 16px;
-  padding-top: 14px;
-}
-
-.ok {
-  color: green;
-  font-weight: bold;
-}
-
-.warn {
-  color: red;
-  font-weight: bold;
-}
+body { font-family: system-ui; padding: 16px; max-width: 1100px; margin: auto; }
+input { font-size: 16px; padding: 10px; width: 100%; margin: 8px 0; }
+table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+.day-row td { background: #f1f1f1; font-weight: bold; font-size: 16px; }
+.ok { color: green; font-weight: bold; }
+.warn { color: red; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -55,9 +19,8 @@ th, td {
 <h1>Bolusanalys</h1>
 
 <p>
-Ladda upp Tandem CSV-export. Appen grupperar måltidsbolus per dag,
-slår ihop bolus inom 40 minuter och jämför CGM cirka 2 timmar efter bolus
-mot målvärdet 6,1 mmol/l.
+Ladda upp Tandem CSV-export. Appen slår ihop bolus inom 40 minuter,
+hanterar förlängd bolus och jämför CGM +2h mot mål 6,1 mmol/l.
 </p>
 
 <input type="file" id="csvFile" accept=".csv">
@@ -85,9 +48,7 @@ const MERGE_WINDOW_MINUTES = 40;
 document.getElementById("csvFile").addEventListener("change", async e => {
   const file = e.target.files[0];
   if (!file) return;
-
-  const text = await file.text();
-  analyzeCsv(text);
+  analyzeCsv(await file.text());
 });
 
 function parseCsvLine(line) {
@@ -96,14 +57,11 @@ function parseCsvLine(line) {
   let inQuotes = false;
 
   for (let char of line) {
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === "," && !inQuotes) {
+    if (char === '"') inQuotes = !inQuotes;
+    else if (char === "," && !inQuotes) {
       result.push(current);
       current = "";
-    } else {
-      current += char;
-    }
+    } else current += char;
   }
 
   result.push(current);
@@ -112,10 +70,8 @@ function parseCsvLine(line) {
 
 function analyzeCsv(text) {
   const lines = text.split(/\r?\n/).filter(Boolean);
-
   const cgm = [];
   const boluses = [];
-
   let mode = "";
 
   for (const line of lines) {
@@ -139,22 +95,37 @@ function analyzeCsv(text) {
     }
 
     if (mode === "bolus" && cols[0] === "Bolus") {
-      const bolusType = cols[1] || "";
-      const carbs = Number(cols[16] || 0);
-      const mealBolus = Number(cols[7] || 0);
-      const insulin = Number(cols[6] || 0);
-      const startTime = new Date(cols[5]);
+      const dosingMethod = cols[2] || "";
+      const isExtended = dosingMethod.toLowerCase().includes("förläng");
 
-      if (carbs > 0 && mealBolus > 0) {
+      const completionTime = new Date(cols[5]);
+      const extendedStartTime = cols[10] ? new Date(cols[10]) : null;
+      const extendedEndTime = cols[11] ? new Date(cols[11]) : null;
+
+      const displayTime = isExtended && extendedStartTime
+        ? extendedStartTime
+        : completionTime;
+
+      const endTime = isExtended && extendedEndTime
+        ? extendedEndTime
+        : completionTime;
+
+      const normalInsulin = Number(cols[6] || 0);
+      const extendedInsulin = Number(cols[12] || 0);
+      const insulin = normalInsulin + extendedInsulin;
+
+      const mealBolus = Number(cols[7] || 0) + extendedInsulin;
+      const carbs = Number(cols[16] || 0);
+
+      if (carbs > 0 && insulin > 0) {
         boluses.push({
-          time: startTime,
-          endTime: getBolusEndTime(cols, startTime),
+          time: displayTime,
+          endTime,
           bg: Number(cols[3]),
           insulin,
           mealBolus,
           carbs,
-          bolusType,
-          isExtended: bolusType.toLowerCase().includes("förläng")
+          isExtended
         });
       }
     }
@@ -191,18 +162,17 @@ function mergeBoluses(boluses) {
       lastGroup &&
       (b.time - lastGroup.lastBolusTime) <= MERGE_WINDOW_MINUTES * 60 * 1000
     ) {
-      lastGroup.items.push(b);
       lastGroup.carbs += b.carbs;
       lastGroup.insulin += b.insulin;
       lastGroup.mealBolus += b.mealBolus;
       lastGroup.lastBolusTime = b.time;
-      lastGroup.latestEndTime =
-        b.endTime > lastGroup.latestEndTime ? b.endTime : lastGroup.latestEndTime;
+      lastGroup.latestEndTime = b.endTime > lastGroup.latestEndTime
+        ? b.endTime
+        : lastGroup.latestEndTime;
       lastGroup.hasMultiple = true;
       lastGroup.hasExtended = lastGroup.hasExtended || b.isExtended;
     } else {
       groups.push({
-        items: [b],
         firstBolusTime: b.time,
         lastBolusTime: b.time,
         latestEndTime: b.endTime,
@@ -219,68 +189,19 @@ function mergeBoluses(boluses) {
   return groups;
 }
 
-function getBolusEndTime(cols, startTime) {
-  const possibleDurationColumns = [9, 10, 11, 12, 13, 14, 15];
-
-  for (const index of possibleDurationColumns) {
-    const value = cols[index];
-    const minutes = parseDurationToMinutes(value);
-
-    if (minutes && minutes > 0) {
-      return new Date(startTime.getTime() + minutes * 60 * 1000);
-    }
-  }
-
-  return startTime;
-}
-
-function parseDurationToMinutes(value) {
-  if (!value) return 0;
-
-  const text = String(value).toLowerCase();
-
-  const hourMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(h|tim|hour)/);
-  const minMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(m|min)/);
-
-  let minutes = 0;
-
-  if (hourMatch) {
-    minutes += Number(hourMatch[1].replace(",", ".")) * 60;
-  }
-
-  if (minMatch) {
-    minutes += Number(minMatch[1].replace(",", "."));
-  }
-
-  if (!hourMatch && !minMatch) {
-    const numeric = Number(text.replace(",", "."));
-
-    if (!isNaN(numeric) && numeric > 0 && numeric <= 24) {
-      minutes = numeric * 60;
-    }
-  }
-
-  return minutes;
-}
-
 function findClosestCgm(cgm, targetTime) {
   let best = null;
   let bestDiff = Infinity;
 
   for (const point of cgm) {
     const diff = Math.abs(point.time - targetTime);
-
     if (diff < bestDiff) {
       best = point;
       bestDiff = diff;
     }
   }
 
-  if (bestDiff > 20 * 60 * 1000) {
-    return null;
-  }
-
-  return best;
+  return bestDiff > 20 * 60 * 1000 ? null : best;
 }
 
 function formatDate(date) {
@@ -306,27 +227,16 @@ function formatDiff(value) {
 
 function getNote(r) {
   const notes = [];
-
-  if (r.hasMultiple) {
-    notes.push("Multipla bolus");
-  }
-
-  if (r.hasExtended) {
-    notes.push("Förlängd bolus");
-  }
-
-  return notes.length ? notes.join(" + ") : "";
+  if (r.hasMultiple) notes.push("Multipla bolus");
+  if (r.hasExtended) notes.push("Förlängd bolus");
+  return notes.join(" + ");
 }
 
 function render(results) {
   let currentDay = "";
 
   if (!results.length) {
-    rows.innerHTML = `
-      <tr>
-        <td colspan="8">Inga måltidsbolus hittades i filen.</td>
-      </tr>
-    `;
+    rows.innerHTML = `<tr><td colspan="8">Inga måltidsbolus hittades.</td></tr>`;
     return;
   }
 

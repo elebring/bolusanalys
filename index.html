@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bolusanalys</title>
+<style>
+body { font-family: system-ui; padding: 16px; max-width: 700px; margin: auto; }
+input, button { font-size: 16px; padding: 10px; margin: 6px 0; width: 100%; }
+.card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin: 12px 0; }
+table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+td, th { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+</style>
+</head>
+<body>
+
+<h1>Bolusanalys</h1>
+<p>Fyll i värden från Tandem-rapporten. Appen räknar total insulinmängd under 2 timmar.</p>
+
+<div class="card">
+  <label>Tid för måltidsbolus</label>
+  <input id="time" placeholder="t.ex. 06:30">
+
+  <label>Kolhydrater, gram</label>
+  <input id="carbs" type="number" step="0.1">
+
+  <label>Blodsocker vid bolus, mmol/l</label>
+  <input id="bgStart" type="number" step="0.1">
+
+  <label>Blodsocker 2 timmar efter bolus, mmol/l</label>
+  <input id="bgAfter" type="number" step="0.1">
+
+  <label>Bolusdos, enheter</label>
+  <input id="bolus" type="number" step="0.01">
+
+  <label>Basal under 2 timmar, enheter</label>
+  <input id="basal" type="number" step="0.01">
+
+  <button onclick="addEntry()">Lägg till</button>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Tid</th>
+<th>BG start</th>
+<th>BG +2h</th>
+<th>Insulin totalt</th>
+<th>Ändring</th>
+</tr>
+</thead>
+<tbody id="rows"></tbody>
+</table>
+
+<script>
+const entries = JSON.parse(localStorage.getItem("entries") || "[]");
+render();
+
+function addEntry() {
+  const entry = {
+    time: time.value,
+    carbs: Number(carbs.value || 0),
+    bgStart: Number(bgStart.value || 0),
+    bgAfter: Number(bgAfter.value || 0),
+    bolus: Number(bolus.value || 0),
+    basal: Number(basal.value || 0)
+  };
+
+  entry.totalInsulin = entry.bolus + entry.basal;
+  entry.bgChange = entry.bgAfter - entry.bgStart;
+
+  entries.push(entry);
+  localStorage.setItem("entries", JSON.stringify(entries));
+  render();
+
+  document.querySelectorAll("input").forEach(i => i.value = "");
+}
+
+function render() {
+  rows.innerHTML = entries.map(e => `
+    <tr>
+      <td>${e.time}<br>${e.carbs} g</td>
+      <td>${e.bgStart.toFixed(1)}</td>
+      <td>${e.bgAfter.toFixed(1)}</td>
+      <td>${e.totalInsulin.toFixed(2)} E</td>
+      <td>${e.bgChange > 0 ? "+" : ""}${e.bgChange.toFixed(1)} mmol/l</td>
+    </tr>
+  `).join("");
+}
+</script>
+
+</body>
+</html>

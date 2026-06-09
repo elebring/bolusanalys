@@ -61,18 +61,48 @@ function parseCsvLine(line) {
     else if (char === "," && !inQuotes) {
       result.push(current);
       current = "";
-    } else current += char;
+    } else {
+      current += char;
+    }
   }
 
   result.push(current);
   return result.map(x => x.trim());
 }
 
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFC")
+    .trim();
+}
+
+function makeHeaderMap(headers) {
+  const map = {};
+  headers.forEach((h, i) => {
+    map[h.trim()] = i;
+  });
+  return map;
+}
+
+function get(cols, map, name) {
+  const index = map[name];
+  return index === undefined ? "" : cols[index];
+}
+
+function num(value) {
+  const n = Number(String(value || "").replace(",", "."));
+  return isNaN(n) ? 0 : n;
+}
+
 function analyzeCsv(text) {
   const lines = text.split(/\r?\n/).filter(Boolean);
+
   const cgm = [];
   const boluses = [];
+
   let mode = "";
+  let bolusMap = null;
 
   for (const line of lines) {
     const cols = parseCsvLine(line);
@@ -84,23 +114,27 @@ function analyzeCsv(text) {
 
     if (line.startsWith("Typ,Bolustyp")) {
       mode = "bolus";
+      bolusMap = makeHeaderMap(cols);
       continue;
     }
 
     if (mode === "cgm" && cols[2] === "EGV") {
       cgm.push({
         time: new Date(cols[3]),
-        value: Number(cols[4])
+        value: num(cols[4])
       });
     }
 
-    if (mode === "bolus" && cols[0] === "Bolus") {
-      const dosingMethod = cols[2] || "";
-      const isExtended = dosingMethod.toLowerCase().includes("förläng");
+    if (mode === "bolus" && get(cols, bolusMap, "Typ") === "Bolus") {
+      const dosingMethod = get(cols, bolusMap, "Bolus Dosering Metod");
+      const isExtended = normalizeText(dosingMethod).includes("förläng");
 
-      const completionTime = new Date(cols[5]);
-      const extendedStartTime = cols[10] ? new Date(cols[10]) : null;
-      const extendedEndTime = cols[11] ? new Date(cols[11]) : null;
+      const completionTime = new Date(get(cols, bolusMap, "Slutförande Datum Tid"));
+      const extendedStartRaw = get(cols, bolusMap, "Fölängd bolus Start Datum Tid");
+      const extendedEndRaw = get(cols, bolusMap, "Förlbol Slutförande Datum Tid");
+
+      const extendedStartTime = extendedStartRaw ? new Date(extendedStartRaw) : null;
+      const extendedEndTime = extendedEndRaw ? new Date(extendedEndRaw) : null;
 
       const displayTime = isExtended && extendedStartTime
         ? extendedStartTime
@@ -110,20 +144,16 @@ function analyzeCsv(text) {
         ? extendedEndTime
         : completionTime;
 
-      const normalInsulin = Number(cols[6] || 0);
-      const extendedInsulin = Number(cols[12] || 0);
-      const insulin = normalInsulin + extendedInsulin;
-
-      const mealBolus = Number(cols[7] || 0) + extendedInsulin;
-      const carbs = Number(cols[16] || 0);
+      const carbs = num(get(cols, bolusMap, "Kolhydratsstorlek"));
+      const insulin = num(get(cols, bolusMap, "Insulin Doserat"));
+      const bg = num(get(cols, bolusMap, "BG (mmol/L)"));
 
       if (carbs > 0 && insulin > 0) {
         boluses.push({
           time: displayTime,
           endTime,
-          bg: Number(cols[3]),
+          bg,
           insulin,
-          mealBolus,
           carbs,
           isExtended
         });
@@ -132,7 +162,6 @@ function analyzeCsv(text) {
   }
 
   boluses.sort((a, b) => a.time - b.time);
-
   const groupedBoluses = mergeBoluses(boluses);
 
   const results = groupedBoluses.map(g => {
@@ -164,7 +193,6 @@ function mergeBoluses(boluses) {
     ) {
       lastGroup.carbs += b.carbs;
       lastGroup.insulin += b.insulin;
-      lastGroup.mealBolus += b.mealBolus;
       lastGroup.lastBolusTime = b.time;
       lastGroup.latestEndTime = b.endTime > lastGroup.latestEndTime
         ? b.endTime
@@ -179,7 +207,6 @@ function mergeBoluses(boluses) {
         bg: b.bg,
         carbs: b.carbs,
         insulin: b.insulin,
-        mealBolus: b.mealBolus,
         hasMultiple: false,
         hasExtended: b.isExtended
       });

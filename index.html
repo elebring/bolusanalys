@@ -5,87 +5,175 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bolusanalys</title>
 <style>
-body { font-family: system-ui; padding: 16px; max-width: 700px; margin: auto; }
-input, button { font-size: 16px; padding: 10px; margin: 6px 0; width: 100%; }
-.card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin: 12px 0; }
-table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-td, th { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+body { font-family: system-ui; padding: 16px; max-width: 900px; margin: auto; }
+input, button { font-size: 16px; padding: 10px; width: 100%; margin: 8px 0; }
+table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+.good { color: green; }
+.bad { color: red; }
 </style>
 </head>
 <body>
 
 <h1>Bolusanalys</h1>
-<p>Fyll i värden från Tandem-rapporten. Appen räknar total insulinmängd under 2 timmar.</p>
 
-<div class="card">
-  <label>Tid för måltidsbolus</label>
-  <input id="time" placeholder="t.ex. 06:30">
+<p>Ladda upp Tandem CSV-export. Appen hittar måltidsbolus och jämför CGM vid bolus med CGM cirka 2 timmar senare.</p>
 
-  <label>Kolhydrater, gram</label>
-  <input id="carbs" type="number" step="0.1">
-
-  <label>Blodsocker vid bolus, mmol/l</label>
-  <input id="bgStart" type="number" step="0.1">
-
-  <label>Blodsocker 2 timmar efter bolus, mmol/l</label>
-  <input id="bgAfter" type="number" step="0.1">
-
-  <label>Bolusdos, enheter</label>
-  <input id="bolus" type="number" step="0.01">
-
-  <label>Basal under 2 timmar, enheter</label>
-  <input id="basal" type="number" step="0.01">
-
-  <button onclick="addEntry()">Lägg till</button>
-</div>
+<input type="file" id="csvFile" accept=".csv">
 
 <table>
 <thead>
 <tr>
 <th>Tid</th>
-<th>BG start</th>
-<th>BG +2h</th>
-<th>Insulin totalt</th>
-<th>Ändring</th>
+<th>Kolh.</th>
+<th>Bolus</th>
+<th>BG vid bolus</th>
+<th>CGM +2h</th>
+<th>Förändring</th>
 </tr>
 </thead>
 <tbody id="rows"></tbody>
 </table>
 
 <script>
-const entries = JSON.parse(localStorage.getItem("entries") || "[]");
-render();
+document.getElementById("csvFile").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  if (!file) return;
 
-function addEntry() {
-  const entry = {
-    time: time.value,
-    carbs: Number(carbs.value || 0),
-    bgStart: Number(bgStart.value || 0),
-    bgAfter: Number(bgAfter.value || 0),
-    bolus: Number(bolus.value || 0),
-    basal: Number(basal.value || 0)
-  };
+  const text = await file.text();
+  analyzeCsv(text);
+});
 
-  entry.totalInsulin = entry.bolus + entry.basal;
-  entry.bgChange = entry.bgAfter - entry.bgStart;
+function parseCsvLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
 
-  entries.push(entry);
-  localStorage.setItem("entries", JSON.stringify(entries));
-  render();
+  for (let char of line) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
 
-  document.querySelectorAll("input").forEach(i => i.value = "");
+  result.push(current);
+  return result.map(x => x.trim());
 }
 
-function render() {
-  rows.innerHTML = entries.map(e => `
-    <tr>
-      <td>${e.time}<br>${e.carbs} g</td>
-      <td>${e.bgStart.toFixed(1)}</td>
-      <td>${e.bgAfter.toFixed(1)}</td>
-      <td>${e.totalInsulin.toFixed(2)} E</td>
-      <td>${e.bgChange > 0 ? "+" : ""}${e.bgChange.toFixed(1)} mmol/l</td>
-    </tr>
-  `).join("");
+function analyzeCsv(text) {
+  const lines = text.split(/\r?\n/).filter(Boolean);
+
+  const cgm = [];
+  const boluses = [];
+
+  let mode = "";
+
+  for (const line of lines) {
+    const cols = parseCsvLine(line);
+
+    if (line.startsWith("Enhetstyp,Serienummer,Beskrivning")) {
+      mode = "cgm";
+      continue;
+    }
+
+    if (line.startsWith("Typ,Bolustyp")) {
+      mode = "bolus";
+      continue;
+    }
+
+    if (mode === "cgm" && cols[2] === "EGV") {
+      cgm.push({
+        time: new Date(cols[3]),
+        value: Number(cols[4])
+      });
+    }
+
+    if (mode === "bolus" && cols[0] === "Bolus") {
+      const bolusType = cols[1];
+      const carbs = Number(cols[16] || 0);
+      const mealBolus = Number(cols[7] || 0);
+
+      if (
+        carbs > 0 &&
+        mealBolus > 0 &&
+        (bolusType.includes("Måltid") || bolusType.includes("Mat"))
+      ) {
+        boluses.push({
+          time: new Date(cols[5]),
+          bg: Number(cols[3]),
+          insulin: Number(cols[6]),
+          mealBolus,
+          carbs
+        });
+      }
+    }
+  }
+
+  const results = boluses.map(b => {
+    const afterTime = new Date(b.time.getTime() + 2 * 60 * 60 * 1000);
+    const cgmAfter = findClosestCgm(cgm, afterTime);
+    const change = cgmAfter ? cgmAfter.value - b.bg : null;
+
+    return { ...b, cgmAfter, change };
+  });
+
+  render(results);
+}
+
+function findClosestCgm(cgm, targetTime) {
+  let best = null;
+  let bestDiff = Infinity;
+
+  for (const point of cgm) {
+    const diff = Math.abs(point.time - targetTime);
+
+    if (diff < bestDiff) {
+      best = point;
+      bestDiff = diff;
+    }
+  }
+
+  // Acceptera bara CGM inom 20 minuter från 2-timmarspunkten
+  if (bestDiff > 20 * 60 * 1000) return null;
+
+  return best;
+}
+
+function formatTime(date) {
+  return date.toLocaleString("sv-SE", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function render(results) {
+  rows.innerHTML = results.map(r => {
+    const after = r.cgmAfter ? r.cgmAfter.value.toFixed(1) : "saknas";
+    const change = r.change === null
+      ? "saknas"
+      : `${r.change > 0 ? "+" : ""}${r.change.toFixed(1)}`;
+
+    const cls = r.change === null
+      ? ""
+      : Math.abs(r.change) <= 2 ? "good" : "bad";
+
+    return `
+      <tr>
+        <td>${formatTime(r.time)}</td>
+        <td>${r.carbs} g</td>
+        <td>${r.insulin.toFixed(2)} E</td>
+        <td>${r.bg.toFixed(1)}</td>
+        <td>${after}</td>
+        <td class="${cls}">${change}</td>
+      </tr>
+    `;
+  }).join("");
 }
 </script>
 
